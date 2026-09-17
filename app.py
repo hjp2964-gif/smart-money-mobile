@@ -101,7 +101,7 @@ if uploaded is None:
     st.stop()
 
 try:
-    df=read_excel(uploaded)
+    df=pd.read_excel(uploaded)
 except Exception as e:
     st.error(f"엑셀을 읽지 못했습니다: {e}")
     st.stop()
