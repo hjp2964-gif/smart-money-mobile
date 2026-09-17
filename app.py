@@ -106,9 +106,23 @@ except Exception as e:
     st.error(f"엑셀을 읽지 못했습니다: {e}")
     st.stop()
 
-valid=df.dropna(subset=["date"]).sort_values("date")
-min_d=valid.date.min().date()
-max_d=valid.date.max().date()
+# 업로드 엑셀 기준: A열=날짜, V열=주가, X열=외국인 순매수
+if len(df.columns) < 24:
+    st.error("엑셀에 A열, V열, X열 데이터가 없습니다.")
+    st.stop()
+
+df["date"] = pd.to_datetime(df.iloc[:, 0], errors="coerce")
+df["price"] = pd.to_numeric(df.iloc[:, 21], errors="coerce")
+df["foreign"] = pd.to_numeric(df.iloc[:, 23], errors="coerce")
+
+valid = df.dropna(subset=["date"]).sort_values("date")
+
+if valid.empty:
+    st.error("A열에서 날짜 데이터를 찾지 못했습니다.")
+    st.stop()
+
+min_d = valid["date"].min().date()
+max_d = valid["date"].max().date()
 
 with st.expander("분석 설정", expanded=True):
     c1,c2=st.columns(2)
