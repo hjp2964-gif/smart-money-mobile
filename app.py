@@ -85,7 +85,7 @@ def build_score_history(x, floating):
     return pd.DataFrame(rows)
 
 def prepare(uploaded, start_date, end_date):
-    df=read_excel(uploaded)
+    df=pd.read_excel(uploaded)
     x=df[(df.date>=pd.Timestamp(start_date)) & (df.date<=pd.Timestamp(end_date))].copy()
     x=x.sort_values("date").dropna(subset=["foreign"])
     if x.empty:
