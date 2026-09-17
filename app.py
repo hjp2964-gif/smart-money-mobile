@@ -86,7 +86,7 @@ def build_score_history(x, floating):
 
 def prepare(uploaded, start_date, end_date):
     df=pd.read_excel(uploaded)
-    x=df[(df.date>=pd.Timestamp(start_date)) & (df.date<=pd.Timestamp(end_date))].copy()
+    df = df[(df["date"] >= pd.Timestamp(start_date)) & (df["date"] <= pd.Timestamp(end_date))].copy()
     x=x.sort_values("date").dropna(subset=["foreign"])
     if x.empty:
         raise ValueError("선택한 기간에 외국인 수급 데이터가 없습니다.")
