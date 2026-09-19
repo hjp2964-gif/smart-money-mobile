@@ -8,44 +8,68 @@ from plotly.subplots import make_subplots
 
 
 # =========================================================
-# 기본 설정
+# 페이지 설정
 # =========================================================
 
 st.set_page_config(
-    page_title="Smart Money Mobile",
+    page_title="외국인 Smart Money 분석기",
     page_icon="📈",
     layout="wide"
 )
 
 st.markdown("""
 <style>
+
 .block-container {
-    padding-top: 1rem;
+    padding-top: 0.7rem;
     padding-bottom: 2rem;
-    max-width: 1200px;
+    max-width: 1500px;
+}
+
+h1 {
+    margin-bottom: 0.1rem;
+}
+
+[data-testid="stMetric"] {
+    background: #f7f9fc;
+    border: 1px solid #e5eaf2;
+    padding: 12px;
+    border-radius: 12px;
 }
 
 [data-testid="stMetricValue"] {
-    font-size: 1.35rem;
+    font-size: 1.45rem;
+    font-weight: 700;
 }
 
-@media (max-width: 640px) {
+div[data-baseweb="tab-list"] {
+    gap: 6px;
+}
+
+@media (max-width: 700px) {
+
     .block-container {
-        padding-left: .65rem;
-        padding-right: .65rem;
+        padding-left: 0.55rem;
+        padding-right: 0.55rem;
+        padding-top: 0.4rem;
     }
 
     h1 {
-        font-size: 1.45rem !important;
+        font-size: 1.55rem !important;
     }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.15rem;
+    }
+
 }
+
 </style>
 """, unsafe_allow_html=True)
 
 
 # =========================================================
-# 누적 매집 규모 점수 / 30
-# 유동주식 대비 누적 순매수율 기준
+# 점수 함수
 # =========================================================
 
 def accumulation_score(rate):
@@ -65,10 +89,6 @@ def accumulation_score(rate):
     else:
         return 30
 
-
-# =========================================================
-# 비율 점수
-# =========================================================
 
 def ratio_score(ratio, max_score):
 
@@ -94,9 +114,14 @@ def ratio_score(ratio, max_score):
 
 def smart_money_scores(data, floating):
 
-    x = data.dropna(subset=["foreign"]).copy()
+    d = (
+        data
+        .dropna(subset=["date", "foreign"])
+        .sort_values("date")
+        .copy()
+    )
 
-    net = float(x["foreign"].sum())
+    net = float(d["foreign"].sum())
 
     # 1. 누적 매집 규모 /30
     if floating > 0:
@@ -111,18 +136,18 @@ def smart_money_scores(data, floating):
 
 
     # 2. 매집 지속성 /30
-    # 장기 매집 여부 판단은 월 단위 유지
+    # 장기 추세이므로 월 단위
 
-    monthly_foreign = (
-        x
+    monthly_flow = (
+        d
         .set_index("date")["foreign"]
         .resample("ME")
         .sum()
     )
 
     positive_ratio = (
-        float((monthly_foreign > 0).mean())
-        if len(monthly_foreign)
+        float((monthly_flow > 0).mean())
+        if len(monthly_flow)
         else 0
     )
 
@@ -133,18 +158,17 @@ def smart_money_scores(data, floating):
 
 
     # 3. 하락·횡보 구간 매수 /20
-    # 월간 주가 + 외국인 월간 수급 기준
 
     monthly_price = (
-        data
+        d
         .dropna(subset=["price"])
         .set_index("date")["price"]
         .resample("ME")
         .agg(["first", "last"])
     )
 
-    monthly_flow = (
-        data
+    mf = (
+        d
         .set_index("date")["foreign"]
         .resample("ME")
         .sum()
@@ -153,27 +177,37 @@ def smart_money_scores(data, floating):
     monthly = (
         monthly_price
         .join(
-            monthly_flow.rename("foreign"),
+            mf.rename("foreign"),
             how="inner"
         )
         .dropna()
     )
 
-    monthly["ret"] = (
-        monthly["last"]
-        / monthly["first"]
-        - 1
-    )
+    if len(monthly):
 
-    weak = monthly[
-        monthly["ret"] <= 0.03
-    ]
+        monthly["return"] = (
+            monthly["last"]
+            / monthly["first"]
+            - 1
+        )
 
-    weak_buy_ratio = (
-        float((weak["foreign"] > 0).mean())
-        if len(weak)
-        else 0
-    )
+        weak = monthly[
+            monthly["return"] <= 0.03
+        ]
+
+        weak_buy_ratio = (
+            float(
+                (weak["foreign"] > 0).mean()
+            )
+            if len(weak)
+            else 0
+        )
+
+    else:
+
+        weak = pd.DataFrame()
+        weak_buy_ratio = 0
+
 
     s3 = ratio_score(
         weak_buy_ratio,
@@ -183,7 +217,7 @@ def smart_money_scores(data, floating):
 
     # 4. 최근 매집 가속도 /20
 
-    flow = x["foreign"].to_numpy(float)
+    flow = d["foreign"].to_numpy(float)
 
     recent = (
         float(np.mean(flow[-60:]))
@@ -220,26 +254,26 @@ def smart_money_scores(data, floating):
 
     else:
 
-        acceleration_ratio = recent / prior
+        ratio = recent / prior
 
-        if acceleration_ratio >= 2:
+        if ratio >= 2:
             s4 = 20
-        elif acceleration_ratio >= 1.5:
+
+        elif ratio >= 1.5:
             s4 = 16
-        elif acceleration_ratio >= 1:
+
+        elif ratio >= 1:
             s4 = 12
-        elif acceleration_ratio >= 0.5:
+
+        elif ratio >= 0.5:
             s4 = 8
+
         else:
             s4 = 4
 
         acceleration_text = (
-            f"최근/직전 60거래일 평균 "
-            f"{acceleration_ratio:.2f}배"
+            f"최근/직전 60거래일 평균 {ratio:.2f}배"
         )
-
-
-    total = s1 + s2 + s3 + s4
 
 
     return {
@@ -252,7 +286,7 @@ def smart_money_scores(data, floating):
         "s3": s3,
         "s4": s4,
 
-        "total": total,
+        "total": s1 + s2 + s3 + s4,
 
         "positive_ratio": positive_ratio,
         "weak_buy_ratio": weak_buy_ratio,
@@ -265,7 +299,7 @@ def smart_money_scores(data, floating):
 
 
 # =========================================================
-# 일별 Score 변화
+# Score 변화
 # =========================================================
 
 def build_score_history(data, floating):
@@ -273,7 +307,7 @@ def build_score_history(data, floating):
     d = (
         data
         .dropna(subset=["date", "foreign"])
-        .copy()
+        .sort_values("date")
         .reset_index(drop=True)
     )
 
@@ -291,6 +325,7 @@ def build_score_history(data, floating):
         rows.append({
 
             "date": d.loc[i, "date"],
+
             "price": d.loc[i, "price"],
 
             "total": score["total"],
@@ -305,25 +340,125 @@ def build_score_history(data, floating):
 
 
 # =========================================================
-# 공통 일별 X축 설정
+# 가격대별 외국인 매물대
 # =========================================================
 
-def daily_xaxis(fig, rangeslider=False):
+def build_price_profile(data, bins=18):
 
-    fig.update_xaxes(
-
-        type="date",
-
-        tickformat="%y.%m.%d",
-
-        hoverformat="%Y-%m-%d",
-
-        showgrid=True,
-
-        rangeslider_visible=rangeslider
+    d = (
+        data
+        .dropna(subset=["price", "foreign"])
+        .copy()
     )
 
-    return fig
+    if d.empty:
+        return pd.DataFrame()
+
+
+    low = float(d["price"].min())
+    high = float(d["price"].max())
+
+
+    if low == high:
+        return pd.DataFrame()
+
+
+    edges = np.linspace(
+        low,
+        high,
+        bins + 1
+    )
+
+
+    d["price_bucket"] = pd.cut(
+        d["price"],
+        bins=edges,
+        include_lowest=True,
+        duplicates="drop"
+    )
+
+
+    profile = (
+        d
+        .groupby(
+            "price_bucket",
+            observed=True
+        )
+        .agg(
+
+            net_foreign=(
+                "foreign",
+                "sum"
+            ),
+
+            buy_foreign=(
+                "foreign",
+                lambda x:
+                x[x > 0].sum()
+            ),
+
+            sell_foreign=(
+                "foreign",
+                lambda x:
+                -x[x < 0].sum()
+            )
+        )
+        .reset_index()
+    )
+
+
+    profile["price_mid"] = (
+        profile["price_bucket"]
+        .apply(
+            lambda x:
+            (x.left + x.right) / 2
+        )
+        .astype(float)
+    )
+
+
+    return profile
+
+
+# =========================================================
+# 날짜 파싱
+# 실제 파일 A열 형식: '20/03/20
+# =========================================================
+
+def parse_dates(series):
+
+    text = (
+        series
+        .astype(str)
+        .str.strip()
+        .str.replace(
+            "'",
+            "",
+            regex=False
+        )
+    )
+
+
+    result = pd.to_datetime(
+        text,
+        format="%y/%m/%d",
+        errors="coerce"
+    )
+
+
+    missing = result.isna()
+
+    if missing.any():
+
+        result.loc[missing] = (
+            pd.to_datetime(
+                text.loc[missing],
+                errors="coerce"
+            )
+        )
+
+
+    return result
 
 
 # =========================================================
@@ -335,16 +470,16 @@ st.title(
 )
 
 st.caption(
-    "외국인의 장기 누적 매집과 Smart Money Score를 일별로 확인합니다."
+    "외국인의 장기 누적 매집과 주가 흐름을 한눈에 분석합니다."
 )
 
 
 # =========================================================
-# 파일 업로드
+# 엑셀 업로드
 # =========================================================
 
 uploaded = st.file_uploader(
-    "분석할 엑셀 파일",
+    "엑셀 불러오기",
     type=["xlsx", "xls"]
 )
 
@@ -352,19 +487,33 @@ uploaded = st.file_uploader(
 if uploaded is None:
 
     st.info(
-        "엑셀 파일을 선택하면 분석을 시작합니다."
+        "분석할 엑셀 파일을 선택해주세요."
     )
 
     st.stop()
 
 
 # =========================================================
-# 엑셀 읽기
+# Sheet1 읽기
 # =========================================================
 
 try:
 
-    raw = pd.read_excel(uploaded)
+    excel = pd.ExcelFile(uploaded)
+
+    if "Sheet1" in excel.sheet_names:
+
+        raw = pd.read_excel(
+            uploaded,
+            sheet_name="Sheet1"
+        )
+
+    else:
+
+        raw = pd.read_excel(
+            uploaded,
+            sheet_name=excel.sheet_names[-1]
+        )
 
 except Exception as e:
 
@@ -376,42 +525,40 @@ except Exception as e:
 
 
 # =========================================================
-# A / V / X 확인
+# 실제 파일 구조 확인
+#
+# A열 = 일자
+# B열 = 종가
+# H열 = 외국인 일별 순매수
 # =========================================================
 
-if raw.shape[1] < 24:
+if raw.shape[1] < 8:
 
     st.error(
-        "엑셀에 필요한 A열, V열, X열이 없습니다."
+        "필요한 A열, B열, H열을 찾을 수 없습니다."
     )
 
     st.stop()
 
 
-# =========================================================
-# 분석 데이터
-#
-# A = 날짜
-# V = 주가
-# X = 외국인 순매수
-# =========================================================
-
 df = pd.DataFrame({
 
-    "date": pd.to_datetime(
-        raw.iloc[:, 0],
-        errors="coerce"
-    ),
+    "date":
+        parse_dates(
+            raw.iloc[:, 0]
+        ),
 
-    "price": pd.to_numeric(
-        raw.iloc[:, 21],
-        errors="coerce"
-    ),
+    "price":
+        pd.to_numeric(
+            raw.iloc[:, 1],
+            errors="coerce"
+        ),
 
-    "foreign": pd.to_numeric(
-        raw.iloc[:, 23],
-        errors="coerce"
-    )
+    "foreign":
+        pd.to_numeric(
+            raw.iloc[:, 7],
+            errors="coerce"
+        )
 })
 
 
@@ -426,44 +573,45 @@ df = (
 if df.empty:
 
     st.error(
-        "A열에서 날짜 데이터를 찾지 못했습니다."
-    )
-
-    st.stop()
-
-
-# =========================================================
-# 비정상 날짜 제거
-# =========================================================
-
-today_limit = (
-    pd.Timestamp.today()
-    + pd.Timedelta(days=7)
-)
-
-
-df = df[
-
-    (df["date"] >= pd.Timestamp("2000-01-01"))
-
-    &
-
-    (df["date"] <= today_limit)
-
-].copy()
-
-
-if df.empty:
-
-    st.error(
         "정상적인 날짜 데이터를 찾지 못했습니다."
     )
 
     st.stop()
 
 
-min_d = df["date"].min().date()
-max_d = df["date"].max().date()
+# =========================================================
+# 비정상 값 제거
+# =========================================================
+
+df = df[
+    (df["date"] >= pd.Timestamp("2000-01-01"))
+    &
+    (
+        df["date"]
+        <=
+        pd.Timestamp.today()
+        + pd.Timedelta(days=10)
+    )
+].copy()
+
+
+df.loc[
+    df["price"] <= 0,
+    "price"
+] = np.nan
+
+
+if df.empty:
+
+    st.error(
+        "분석할 데이터가 없습니다."
+    )
+
+    st.stop()
+
+
+min_date = df["date"].min().date()
+max_date = df["date"].max().date()
 
 
 # =========================================================
@@ -475,14 +623,16 @@ with st.expander(
     expanded=True
 ):
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
 
-    with col1:
+    with c1:
 
         stock_name = st.text_input(
             "종목명",
-            value=uploaded.name.rsplit(".", 1)[0]
+            value=
+            uploaded.name
+            .rsplit(".", 1)[0]
         )
 
 
@@ -504,25 +654,26 @@ with st.expander(
         )
 
 
-    with col2:
+    with c2:
 
         analysis_period = st.date_input(
 
             "분석기간",
 
             value=(
-                min_d,
-                max_d
+                min_date,
+                max_date
             ),
 
-            min_value=min_d,
-            max_value=max_d
+            min_value=min_date,
+
+            max_value=max_date
         )
 
 
         if listed > 0 and floating > 0:
 
-            float_ratio = (
+            floating_ratio = (
                 floating
                 / listed
                 * 100
@@ -530,12 +681,12 @@ with st.expander(
 
             st.metric(
                 "유동주식 비율",
-                f"{float_ratio:.2f}%"
+                f"{floating_ratio:.2f}%"
             )
 
         else:
 
-            float_ratio = 0
+            floating_ratio = 0
 
             st.metric(
                 "유동주식 비율",
@@ -544,20 +695,16 @@ with st.expander(
 
 
 # =========================================================
-# 분석기간
+# 기간 선택
 # =========================================================
 
 if (
-
     isinstance(
         analysis_period,
         (tuple, list)
     )
-
     and
-
     len(analysis_period) == 2
-
 ):
 
     start_date = analysis_period[0]
@@ -566,39 +713,34 @@ if (
 else:
 
     st.info(
-        "분석기간의 시작일과 종료일을 선택해주세요."
+        "분석기간 시작일과 종료일을 선택해주세요."
     )
 
     st.stop()
 
 
 # =========================================================
-# 기간 필터
+# 분석기간 필터
 # =========================================================
 
 x = df[
-
     (
         df["date"]
         >=
         pd.Timestamp(start_date)
     )
-
     &
-
     (
         df["date"]
         <=
         pd.Timestamp(end_date)
     )
-
 ].copy()
 
 
 x = (
     x
     .sort_values("date")
-    .dropna(subset=["foreign"])
     .reset_index(drop=True)
 )
 
@@ -606,7 +748,7 @@ x = (
 if x.empty:
 
     st.error(
-        "선택한 분석기간에 외국인 수급 데이터가 없습니다."
+        "선택한 기간에 데이터가 없습니다."
     )
 
     st.stop()
@@ -619,24 +761,59 @@ if x.empty:
 if listed > 0 and floating > listed:
 
     st.warning(
-        "유동주식수가 상장주식수보다 많습니다."
+        "유동주식수가 상장주식수보다 많습니다. 입력값을 확인해주세요."
     )
 
 
 if floating <= 0:
 
     st.warning(
-        "유동주식수를 입력하면 외국인 매집률과 Smart Money Score가 계산됩니다."
+        "유동주식수를 입력하면 유동주식 대비 매집률과 Smart Money Score가 계산됩니다."
     )
 
 
 # =========================================================
-# Score 계산
+# Score
 # =========================================================
 
 score = smart_money_scores(
     x,
     float(floating)
+)
+
+
+# =========================================================
+# 핵심 결과 카드
+# =========================================================
+
+m1, m2, m3, m4 = st.columns(4)
+
+
+m1.metric(
+    "분석기간",
+    f"{start_date.strftime('%y.%m.%d')} ~ {end_date.strftime('%y.%m.%d')}"
+)
+
+
+m2.metric(
+    "외국인 누적 순매수",
+    f"{score['net']:,.0f}주"
+)
+
+
+m3.metric(
+    "유동주식 대비 매집률",
+    (
+        f"{score['rate']:+.2f}%"
+        if floating > 0
+        else "-"
+    )
+)
+
+
+m4.metric(
+    "SMART MONEY SCORE",
+    f"{score['total']:.0f} / 100"
 )
 
 
@@ -648,9 +825,9 @@ tabs = st.tabs([
 
     "📊 요약",
 
-    "📅 일별 수급",
+    "📈 주가 · 외국인 수급",
 
-    "📈 누적 순매수",
+    "📉 누적 순매수",
 
     "🎯 Score 변화"
 ])
@@ -662,34 +839,35 @@ tabs = st.tabs([
 
 with tabs[0]:
 
-    a, b, c, d = st.columns(4)
-
-
-    a.metric(
-        "Smart Money Score",
-        f"{score['total']:.0f} / 100"
+    st.subheader(
+        f"{stock_name} · Smart Money 요약"
     )
 
 
-    b.metric(
-        "외국인 누적 순매수",
-        f"{score['net'] / 10000:,.1f}만주"
+    s1, s2, s3, s4 = st.columns(4)
+
+
+    s1.metric(
+        "누적 매집 규모",
+        f"{score['s1']} / 30"
     )
 
 
-    c.metric(
-        "유동주식 대비 매집률",
-        (
-            f"{score['rate']:.2f}%"
-            if floating > 0
-            else "-"
-        )
+    s2.metric(
+        "매집 지속성",
+        f"{score['s2']} / 30"
     )
 
 
-    d.metric(
+    s3.metric(
+        "하락·횡보 매수",
+        f"{score['s3']} / 20"
+    )
+
+
+    s4.metric(
         "최근 매집 가속도",
-        f"{score['s4']:.0f} / 20"
+        f"{score['s4']} / 20"
     )
 
 
@@ -704,45 +882,33 @@ with tabs[0]:
     )
 
 
-    score_df = pd.DataFrame({
+    summary = pd.DataFrame({
 
         "평가항목": [
-
             "누적 매집 규모",
-
             "매집 지속성",
-
-            "하락·횡보 매수",
-
+            "하락·횡보 구간 매수",
             "최근 매집 가속도"
         ],
 
         "점수": [
-
             score["s1"],
-
             score["s2"],
-
             score["s3"],
-
             score["s4"]
         ],
 
         "배점": [
-
             30,
-
             30,
-
             20,
-
             20
         ]
     })
 
 
     st.dataframe(
-        score_df,
+        summary,
         hide_index=True,
         use_container_width=True
     )
@@ -763,28 +929,77 @@ with tabs[0]:
 
 
 # =========================================================
-# 일별 수급
+# 주가 · 외국인 수급
+# PC 프로그램과 비슷한 구조
 # =========================================================
 
 with tabs[1]:
 
     st.subheader(
-        "주가 · 외국인 일별 순매수"
+        "주가 · 외국인 수급 · 가격대별 외국인 매물대"
     )
 
 
+    # ---------------------------------------------
+    # 가격대별 매물대
+    # ---------------------------------------------
+
+    profile = build_price_profile(
+        x,
+        bins=18
+    )
+
+
+    # ---------------------------------------------
+    # 위쪽: 주가 + 오른쪽 매물대
+    # 아래쪽: 일별 외국인 순매수
+    # ---------------------------------------------
+
     fig = make_subplots(
 
+        rows=2,
+        cols=2,
+
+        column_widths=[
+            0.80,
+            0.20
+        ],
+
+        row_heights=[
+            0.72,
+            0.28
+        ],
+
+        shared_xaxes=False,
+
+        vertical_spacing=0.05,
+
+        horizontal_spacing=0.025,
+
         specs=[
-            [{
-                "secondary_y": True
-            }]
+
+            [
+                {},
+                {}
+            ],
+
+            [
+                {
+                    "colspan": 2
+                },
+                None
+            ]
         ]
     )
 
 
-    price_data = x.dropna(
-        subset=["price"]
+    # ---------------------------------------------
+    # 주가
+    # ---------------------------------------------
+
+    price_data = (
+        x
+        .dropna(subset=["price"])
     )
 
 
@@ -796,16 +1011,108 @@ with tabs[1]:
 
             y=price_data["price"],
 
-            name="주가",
-
             mode="lines",
 
+            name="주가",
+
             line=dict(
-                width=2
-            )
+                width=1.7,
+                color="#1683ff"
+            ),
+
+            hovertemplate=
+                "%{x|%Y-%m-%d}<br>"
+                "종가 %{y:,.0f}원"
+                "<extra></extra>"
         ),
 
-        secondary_y=False
+        row=1,
+        col=1
+    )
+
+
+    # ---------------------------------------------
+    # 오른쪽 가격대별 매물대
+    # 매수 = +
+    # 매도 = -
+    # ---------------------------------------------
+
+    if not profile.empty:
+
+        fig.add_trace(
+
+            go.Bar(
+
+                x=
+                    profile[
+                        "buy_foreign"
+                    ],
+
+                y=
+                    profile[
+                        "price_mid"
+                    ],
+
+                orientation="h",
+
+                name="외국인 매수(+)",
+
+                marker_color=
+                    "rgba(58, 180, 110, 0.55)",
+
+                hovertemplate=
+                    "가격대 %{y:,.0f}원<br>"
+                    "매수 %{x:,.0f}주"
+                    "<extra></extra>"
+            ),
+
+            row=1,
+            col=2
+        )
+
+
+        fig.add_trace(
+
+            go.Bar(
+
+                x=
+                    -profile[
+                        "sell_foreign"
+                    ],
+
+                y=
+                    profile[
+                        "price_mid"
+                    ],
+
+                orientation="h",
+
+                name="외국인 매도(-)",
+
+                marker_color=
+                    "rgba(255, 90, 90, 0.48)",
+
+                hovertemplate=
+                    "가격대 %{y:,.0f}원<br>"
+                    "매도 %{x:,.0f}주"
+                    "<extra></extra>"
+            ),
+
+            row=1,
+            col=2
+        )
+
+
+    # ---------------------------------------------
+    # 아래 외국인 일별 순매수
+    # ---------------------------------------------
+
+    buy = x["foreign"].clip(
+        lower=0
+    )
+
+    sell = x["foreign"].clip(
+        upper=0
     )
 
 
@@ -815,63 +1122,264 @@ with tabs[1]:
 
             x=x["date"],
 
-            y=x["foreign"] / 10000,
+            y=buy,
 
-            name="외국인 일별 순매수",
+            name="일별 순매수(+)",
 
-            opacity=0.45
+            marker_color=
+                "rgba(40, 130, 255, 0.75)",
+
+            hovertemplate=
+                "%{x|%Y-%m-%d}<br>"
+                "순매수 +%{y:,.0f}주"
+                "<extra></extra>"
         ),
 
-        secondary_y=True
+        row=2,
+        col=1
     )
 
+
+    fig.add_trace(
+
+        go.Bar(
+
+            x=x["date"],
+
+            y=sell,
+
+            name="일별 순매도(-)",
+
+            marker_color=
+                "rgba(255, 80, 60, 0.75)",
+
+            hovertemplate=
+                "%{x|%Y-%m-%d}<br>"
+                "순매도 %{y:,.0f}주"
+                "<extra></extra>"
+        ),
+
+        row=2,
+        col=1
+    )
+
+
+    # ---------------------------------------------
+    # 레이아웃
+    # ---------------------------------------------
+
+    fig.update_layout(
+
+        height=720,
+
+        barmode="relative",
+
+        hovermode="x unified",
+
+        legend=dict(
+
+            orientation="h",
+
+            yanchor="bottom",
+
+            y=1.02,
+
+            xanchor="left",
+
+            x=0
+        ),
+
+        margin=dict(
+            l=45,
+            r=20,
+            t=40,
+            b=35
+        )
+    )
+
+
+    # 주가축
 
     fig.update_yaxes(
 
         title_text="주가(원)",
 
-        secondary_y=False
+        tickformat=",",
+
+        row=1,
+        col=1
     )
 
+
+    # 매물대 가격축은 주가축과 동일
+
+    if not profile.empty:
+
+        fig.update_yaxes(
+
+            range=[
+                float(price_data["price"].min()) * 0.98,
+                float(price_data["price"].max()) * 1.02
+            ],
+
+            showticklabels=False,
+
+            row=1,
+            col=2
+        )
+
+
+        fig.update_xaxes(
+
+            title_text="외국인 누적 수급(주)",
+
+            tickformat=".2s",
+
+            zeroline=True,
+
+            zerolinewidth=1,
+
+            row=1,
+            col=2
+        )
+
+
+    # 아래 수급축
 
     fig.update_yaxes(
 
-        title_text="외국인 순매수(만주)",
+        title_text="외국인 일별 순매수(주)",
 
-        secondary_y=True,
+        tickformat=".2s",
 
-        zeroline=True
+        zeroline=True,
+
+        zerolinewidth=1,
+
+        row=2,
+        col=1
     )
 
 
-    fig.update_layout(
+    # 위 날짜축은 숨김
 
-        height=540,
+    fig.update_xaxes(
 
-        hovermode="x unified",
+        showticklabels=False,
 
-        legend=dict(
-            orientation="h"
-        ),
-
-        margin=dict(
-            l=20,
-            r=20,
-            t=30,
-            b=20
-        )
+        row=1,
+        col=1
     )
 
 
-    daily_xaxis(
-        fig,
-        rangeslider=True
+    # 아래 날짜축
+
+    fig.update_xaxes(
+
+        type="date",
+
+        tickformat="%y.%m",
+
+        hoverformat="%Y-%m-%d",
+
+        row=2,
+        col=1
     )
 
 
     st.plotly_chart(
         fig,
-        use_container_width=True
+        use_container_width=True,
+        config={
+            "displaylogo": False,
+            "scrollZoom": True
+        }
+    )
+
+
+    # ---------------------------------------------
+    # 최근 데이터 카드
+    # ---------------------------------------------
+
+    latest_price = (
+        price_data["price"].iloc[-1]
+        if len(price_data)
+        else np.nan
+    )
+
+
+    avg20_price = (
+        price_data["price"]
+        .tail(20)
+        .mean()
+        if len(price_data)
+        else np.nan
+    )
+
+
+    foreign20 = (
+        x["foreign"]
+        .tail(20)
+        .sum()
+    )
+
+
+    foreign60 = (
+        x["foreign"]
+        .tail(60)
+        .sum()
+    )
+
+
+    r1, r2, r3, r4 = (
+        st.columns(4)
+    )
+
+
+    r1.metric(
+
+        "최근 주가",
+
+        (
+            f"{latest_price:,.0f}원"
+            if pd.notna(latest_price)
+            else "-"
+        )
+    )
+
+
+    r2.metric(
+
+        "최근 20거래일 평균 주가",
+
+        (
+            f"{avg20_price:,.0f}원"
+            if pd.notna(avg20_price)
+            else "-"
+        )
+    )
+
+
+    r3.metric(
+
+        "최근 20거래일 외국인 순매수",
+
+        f"{foreign20:+,.0f}주"
+    )
+
+
+    r4.metric(
+
+        "최근 60거래일 외국인 순매수",
+
+        f"{foreign60:+,.0f}주"
+    )
+
+
+    st.info(
+        "오른쪽 가격대별 매물대는 선택한 분석기간 동안 "
+        "각 주가 구간에서 발생한 외국인 매수·매도를 집계한 값입니다. "
+        "차트는 손가락 또는 마우스로 확대·축소할 수 있습니다."
     )
 
 
@@ -881,108 +1389,87 @@ with tabs[1]:
 
 with tabs[2]:
 
+    st.subheader(
+        "외국인 누적 순매수 · 주가"
+    )
+
+
     cumulative = x.copy()
 
 
-    cumulative[
-        "cum_foreign"
-    ] = (
-
-        cumulative[
-            "foreign"
-        ]
+    cumulative["cum_foreign"] = (
+        cumulative["foreign"]
+        .fillna(0)
         .cumsum()
     )
 
 
-    # 유동주식 대비 누적 순매수율
-
     if floating > 0:
 
-        cumulative[
-            "cum_rate"
-        ] = (
-
-            cumulative[
-                "cum_foreign"
-            ]
-
-            /
-
-            float(floating)
-
-            *
-
-            100
+        cumulative["cum_rate"] = (
+            cumulative["cum_foreign"]
+            / float(floating)
+            * 100
         )
 
     else:
 
-        cumulative[
-            "cum_rate"
-        ] = np.nan
+        cumulative["cum_rate"] = np.nan
 
 
-    # 상단 핵심 숫자
-
-    m1, m2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
 
-    m1.metric(
+    c1.metric(
 
         "외국인 누적 순매수",
 
-        f"{cumulative['cum_foreign'].iloc[-1] / 10000:,.1f}만주"
+        f"{cumulative['cum_foreign'].iloc[-1]:+,.0f}주"
     )
 
 
-    m2.metric(
+    c2.metric(
 
         "유동주식 대비 누적 매집률",
 
         (
-            f"{cumulative['cum_rate'].iloc[-1]:.2f}%"
+            f"{cumulative['cum_rate'].iloc[-1]:+.2f}%"
             if floating > 0
             else "-"
         )
     )
 
 
-    if floating <= 0:
+    fig2 = make_subplots(
 
-        st.info(
-            "유동주식수를 입력하면 누적 순매수율 차트를 볼 수 있습니다."
-        )
-
-    else:
-
-        fig = make_subplots(
-
-            specs=[
-                [{
-                    "secondary_y": True
-                }]
-            ]
-        )
+        specs=[
+            [{
+                "secondary_y":
+                    True
+            }]
+        ]
+    )
 
 
-        # 핵심 변경
-        # 누적 주식 수 대신 유동주식 대비 % 사용
+    if floating > 0:
 
-        fig.add_trace(
+        fig2.add_trace(
 
             go.Scatter(
 
-                x=cumulative["date"],
+                x=
+                    cumulative["date"],
 
-                y=cumulative["cum_rate"],
-
-                name="유동주식 대비 누적 매집률",
+                y=
+                    cumulative["cum_rate"],
 
                 mode="lines",
 
+                name=
+                    "유동주식 대비 누적 매집률",
+
                 line=dict(
-                    color="red",
+                    color="#e63946",
                     width=2.5
                 ),
 
@@ -995,81 +1482,136 @@ with tabs[2]:
             secondary_y=False
         )
 
+    else:
 
-        price_data = cumulative.dropna(
-            subset=["price"]
-        )
-
-
-        fig.add_trace(
+        fig2.add_trace(
 
             go.Scatter(
 
-                x=price_data["date"],
+                x=
+                    cumulative["date"],
 
-                y=price_data["price"],
-
-                name="주가",
+                y=
+                    cumulative["cum_foreign"]
+                    / 10000,
 
                 mode="lines",
 
-                opacity=.55
+                name=
+                    "외국인 누적 순매수",
+
+                line=dict(
+                    color="#e63946",
+                    width=2.5
+                )
             ),
 
-            secondary_y=True
+            secondary_y=False
         )
 
 
-        fig.update_yaxes(
+    cp = cumulative.dropna(
+        subset=["price"]
+    )
+
+
+    fig2.add_trace(
+
+        go.Scatter(
+
+            x=cp["date"],
+
+            y=cp["price"],
+
+            mode="lines",
+
+            name="주가",
+
+            line=dict(
+                color="#1683ff",
+                width=1.5
+            ),
+
+            opacity=0.65
+        ),
+
+        secondary_y=True
+    )
+
+
+    fig2.update_layout(
+
+        height=560,
+
+        hovermode="x unified",
+
+        legend=dict(
+            orientation="h"
+        ),
+
+        margin=dict(
+            l=40,
+            r=40,
+            t=30,
+            b=30
+        )
+    )
+
+
+    if floating > 0:
+
+        fig2.update_yaxes(
 
             title_text=
                 "유동주식 대비 누적 매집률(%)",
 
             ticksuffix="%",
 
-            secondary_y=False,
+            secondary_y=False
+        )
 
-            zeroline=True
+    else:
+
+        fig2.update_yaxes(
+
+            title_text=
+                "외국인 누적 순매수(만주)",
+
+            secondary_y=False
         )
 
 
-        fig.update_yaxes(
+    fig2.update_yaxes(
 
-            title_text="주가(원)",
+        title_text="주가(원)",
 
-            secondary_y=True
-        )
+        tickformat=",",
 
-
-        fig.update_layout(
-
-            height=540,
-
-            hovermode="x unified",
-
-            legend=dict(
-                orientation="h"
-            ),
-
-            margin=dict(
-                l=20,
-                r=20,
-                t=30,
-                b=20
-            )
-        )
+        secondary_y=True
+    )
 
 
-        daily_xaxis(
-            fig,
-            rangeslider=True
-        )
+    fig2.update_xaxes(
+
+        type="date",
+
+        tickformat="%y.%m",
+
+        hoverformat="%Y-%m-%d"
+    )
 
 
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+    st.plotly_chart(
+
+        fig2,
+
+        use_container_width=True,
+
+        config={
+            "displaylogo": False,
+            "scrollZoom": True
+        }
+    )
 
 
 # =========================================================
@@ -1078,10 +1620,15 @@ with tabs[2]:
 
 with tabs[3]:
 
+    st.subheader(
+        "Smart Money Score 변화"
+    )
+
+
     if floating <= 0:
 
         st.info(
-            "유동주식수를 입력하면 Score 변화 추이를 볼 수 있습니다."
+            "유동주식수를 입력하면 Score 변화 추이를 확인할 수 있습니다."
         )
 
     else:
@@ -1121,69 +1668,70 @@ with tabs[3]:
                     previous
                 )
 
-                previous_label = (
-                    f"{previous:.0f}점"
-                )
-
-                delta_label = (
-                    f"{delta:+.0f}점"
-                )
-
             else:
 
-                previous_label = "데이터 부족"
-                delta_label = "-"
+                previous = np.nan
+                delta = np.nan
 
 
-            s1, s2, s3 = st.columns(3)
+            h1, h2, h3 = st.columns(3)
 
 
-            s1.metric(
+            h1.metric(
                 "현재 Score",
                 f"{current:.0f}점"
             )
 
 
-            s2.metric(
+            h2.metric(
                 "20거래일 전",
-                previous_label
+                (
+                    f"{previous:.0f}점"
+                    if pd.notna(previous)
+                    else "-"
+                )
             )
 
 
-            s3.metric(
+            h3.metric(
                 "20거래일 변화",
-                delta_label
+                (
+                    f"{delta:+.0f}점"
+                    if pd.notna(delta)
+                    else "-"
+                )
             )
 
 
-            # ---------------------------------------------
-            # 일별 Score + 주가
-            # ---------------------------------------------
-
-            fig = make_subplots(
+            score_fig = make_subplots(
 
                 specs=[
                     [{
-                        "secondary_y": True
+                        "secondary_y":
+                            True
                     }]
                 ]
             )
 
 
-            fig.add_trace(
+            score_fig.add_trace(
 
                 go.Scatter(
 
-                    x=history["date"],
+                    x=
+                        history["date"],
 
-                    y=history["total"],
-
-                    name="Smart Money Score",
+                    y=
+                        history["total"],
 
                     mode="lines",
 
+                    name=
+                        "Smart Money Score",
+
                     line=dict(
-                        width=2.5
+                        color="#e63946",
+                        width=2.3
                     )
                 ),
 
@@ -1191,64 +1739,80 @@ with tabs[3]:
             )
 
 
-            fig.add_hline(
+            score_fig.add_hline(
 
                 y=70,
 
                 line_dash="dash",
 
-                annotation_text="70점"
+                line_color="gray",
+
+                annotation_text="70"
             )
 
 
-            price_history = history.dropna(
+            hp = history.dropna(
                 subset=["price"]
             )
 
 
-            fig.add_trace(
+            score_fig.add_trace(
 
                 go.Scatter(
 
-                    x=price_history["date"],
+                    x=hp["date"],
 
-                    y=price_history["price"],
-
-                    name="주가",
+                    y=hp["price"],
 
                     mode="lines",
 
-                    opacity=.45
+                    name="주가",
+
+                    line=dict(
+                        color="#1683ff",
+                        width=1.4
+                    ),
+
+                    opacity=0.55
                 ),
 
                 secondary_y=True
             )
 
 
-            fig.update_yaxes(
+            score_fig.update_yaxes(
 
                 range=[0, 100],
 
-                title_text="Smart Money Score",
+                title_text="Score",
 
                 secondary_y=False
             )
 
 
-            fig.update_yaxes(
+            score_fig.update_yaxes(
 
                 title_text="주가(원)",
+
+                tickformat=",",
 
                 secondary_y=True
             )
 
 
-            fig.update_layout(
+            score_fig.update_xaxes(
 
-                title=
-                    "일별 Smart Money Score · 주가",
+                type="date",
 
-                height=540,
+                tickformat="%y.%m",
+
+                hoverformat="%Y-%m-%d"
+            )
+
+
+            score_fig.update_layout(
+
+                height=560,
 
                 hovermode="x unified",
 
@@ -1257,34 +1821,35 @@ with tabs[3]:
                 ),
 
                 margin=dict(
-                    l=20,
-                    r=20,
-                    t=50,
-                    b=20
+                    l=40,
+                    r=40,
+                    t=30,
+                    b=30
                 )
             )
 
 
-            daily_xaxis(
-                fig,
-                rangeslider=True
-            )
-
-
             st.plotly_chart(
-                fig,
-                use_container_width=True
+
+                score_fig,
+
+                use_container_width=True,
+
+                config={
+                    "displaylogo": False,
+                    "scrollZoom": True
+                }
             )
 
 
             # ---------------------------------------------
-            # Score 세부 항목 변화
+            # 구성항목 변화
             # ---------------------------------------------
 
-            fig2 = go.Figure()
+            component_fig = go.Figure()
 
 
-            fig2.add_trace(
+            component_fig.add_trace(
 
                 go.Scatter(
 
@@ -1299,7 +1864,7 @@ with tabs[3]:
             )
 
 
-            fig2.add_trace(
+            component_fig.add_trace(
 
                 go.Scatter(
 
@@ -1314,7 +1879,7 @@ with tabs[3]:
             )
 
 
-            fig2.add_trace(
+            component_fig.add_trace(
 
                 go.Scatter(
 
@@ -1329,7 +1894,7 @@ with tabs[3]:
             )
 
 
-            fig2.add_trace(
+            component_fig.add_trace(
 
                 go.Scatter(
 
@@ -1344,11 +1909,12 @@ with tabs[3]:
             )
 
 
-            fig2.update_layout(
+            component_fig.update_layout(
 
-                title="Score 구성항목 일별 변화",
+                title=
+                    "Score 구성항목 변화",
 
-                height=460,
+                height=440,
 
                 hovermode="x unified",
 
@@ -1357,31 +1923,43 @@ with tabs[3]:
                 ),
 
                 margin=dict(
-                    l=20,
+                    l=40,
                     r=20,
                     t=50,
-                    b=20
+                    b=30
                 )
             )
 
 
-            daily_xaxis(
-                fig2,
-                rangeslider=True
+            component_fig.update_xaxes(
+
+                type="date",
+
+                tickformat="%y.%m",
+
+                hoverformat="%Y-%m-%d"
             )
 
 
             st.plotly_chart(
-                fig2,
-                use_container_width=True
+
+                component_fig,
+
+                use_container_width=True,
+
+                config={
+                    "displaylogo": False,
+                    "scrollZoom": True
+                }
             )
 
 
 # =========================================================
-# 하단
+# 하단 안내
 # =========================================================
 
 st.caption(
-    "※ A열=날짜 / V열=주가 / X열=외국인 순매수 기준 · "
-    "누적 매집률은 입력한 유동주식수를 기준으로 계산합니다."
+    "※ 업로드 엑셀 Sheet1 기준: "
+    "A열=일자 / B열=종가 / H열=외국인 일별 순매수 · "
+    "누적 순매수는 선택한 분석기간 시작일부터 다시 계산합니다."
 )
